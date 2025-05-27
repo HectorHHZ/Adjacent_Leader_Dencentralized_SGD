@@ -45,11 +45,11 @@ cudnn.benchmark = True
 from models import resnet
 from models import vggnet
 from models import wrn
-import MACHA_util
+import MACHA_util_triple
 import util
 from graph_manager import FixedProcessor, MatchaProcessor
 from communicator import *
-from torch.optim.lr_scheduler import MultiStepLR
+
 
 ## SYNC_ALLREDUCE: gaurantee all models have the same initialization
 def sync_allreduce(model, rank, size):
@@ -105,7 +105,7 @@ def run(rank, size):
 
     # bug test
     # True to rotate graph
-    args.graph_rotate = True
+    # args.graph_rotate = False
 
     ##  (computation and communication overlap not done yet)
     if (args.topology == 'ring'):
@@ -119,15 +119,17 @@ def run(rank, size):
 
     if (args.topology == 'topology'):
         # load base network topology
-        subGraphs = MACHA_util.select_graph(args.graphid)
+        subGraphs = MACHA_util_triple.select_graph(args.graphid)
         if args.graph_rotate == True:
-            subGraphs1 = MACHA_util.select_graph(args.graphid + 1)
+            subGraphs1 = MACHA_util_triple.select_graph(args.graphid + 1)
+            subGraphs2 = MACHA_util_triple.select_graph(args.graphid + 2)
 
         # define graph activation scheme
         if args.matcha:
             GP = MatchaProcessor(subGraphs, args.budget, rank, size, args.epoch * num_batches, True)
             if args.graph_rotate == True:
                 GP1 = MatchaProcessor(subGraphs1, args.budget, rank, size, args.epoch * num_batches, True)
+                GP2 = MatchaProcessor(subGraphs2, args.budget, rank, size, args.epoch * num_batches, True)
                 print('graph rotation is active, use MATCHA processor')
             else:
                 print('graph rotation is not active, use MATCHA processor')
@@ -135,6 +137,7 @@ def run(rank, size):
             GP = FixedProcessor(subGraphs, args.budget, rank, size, args.epoch * num_batches, True)
             if args.graph_rotate == True:
                 GP1 = FixedProcessor(subGraphs1, args.budget, rank, size, args.epoch * num_batches, True)
+                GP2 = FixedProcessor(subGraphs2, args.budget, rank, size, args.epoch * num_batches, True)
                 print('graph rotation is active, use fix processor')
             else:
                 print('graph rotation is not active, use fix processor')
@@ -147,6 +150,7 @@ def run(rank, size):
             communicator = LLDSGDCommunicator(rank, size, GP)
             if args.graph_rotate == True:
                 communicator1 = LLDSGDCommunicator(rank, size, GP1)
+                communicator2 = LLDSGDCommunicator(rank, size, GP2)
                 print('graph rotation is active and use LLDSGD')
             else:
                 print('graph rotation is NOT active and use LLDSGD')
@@ -154,17 +158,16 @@ def run(rank, size):
             communicator = decenCommunicator(rank, size, GP)
             if args.graph_rotate == True:
                 communicator1 = decenCommunicator(rank, size, GP1)
+                communicator2 = decenCommunicator(rank, size, GP2)
                 print('graph rotation is active')
             else:
                 print('graph rotation is NOT active')
 
     # select neural network model
     model = util.select_model(args.numClass, args)
-
-
     # random model
-    # for param in model.parameters():
-    #     param.data = param.data * random.uniform(0, 2)
+    for param in model.parameters():
+        param.data = param.data * random.uniform(0, 2)
 
 
     model = model.cuda()
@@ -175,7 +178,6 @@ def run(rank, size):
                           momentum=args.momentum,
                           weight_decay=5e-4,
                           nesterov=args.nesterov)
-
 
     # guarantee all local models start from the same point
     # can be removed
@@ -212,10 +214,6 @@ def run(rank, size):
 
         model.train()
 
-        print("start training")
-        print("model is:", args.model)
-        print("dataset is:", args.dataset)
-
         # Start training each epoch
         for batch_idx, (data, target) in enumerate(train_loader):
             print("rank", rank, "epoch", epoch, "batch", batch_idx)
@@ -239,12 +237,7 @@ def run(rank, size):
             loss.backward()
 
             # update learning rate for baseline. This should be modified when comparing with Non-block using lr = 0.1
-
-            if args.model == 'VGG':
-                print('VGG LR update')
-                update_learning_rate_VGG(optimizer, epoch, itr=batch_idx, itr_per_epoch=len(train_loader))
-            else:
-                update_learning_rate(optimizer, epoch, itr=batch_idx, itr_per_epoch=len(train_loader))
+            update_learning_rate(optimizer, epoch, itr=batch_idx, itr_per_epoch=len(train_loader))
 
             # gradient step
             optimizer.step()
@@ -257,18 +250,23 @@ def run(rank, size):
 
             # communication happens here
             pull_force =  (batch_idx % args.iteration == 0) and args.LLDSGD
-
             if (pull_force):
                 if ((args.graph_rotate) and (batch_idx%2 == 0)) == True:
                     getInfo = communicator1.LLDSGDcommunicate(model, loss, args)
-                    print('using rotate graph and LLDSGD')
+                    print('using rotate graph and LLDSGD, graph 2')
+                elif(((args.graph_rotate) and (batch_idx%3 == 0)) == True):
+                    getInfo = communicator2.LLDSGDcommunicate(model, loss, args)
+                    print('using rotate graph and LLDSGD, graph 3')
                 else:
                     getInfo = communicator.LLDSGDcommunicate(model,loss, args)
                     print('using LLDSGD but no rotate')
             else:
                 if ((args.graph_rotate) and (batch_idx%2 == 0)) == True:
                     getInfo = communicator1.communicate(model)
-                    print('using rotate graph but no LLDSGD')
+                    print('using rotate graph but no LLDSGD, graph 2')
+                elif (((args.graph_rotate) and (batch_idx%3 == 0)) == True):
+                    getInfo = communicator2.communicate(model)
+                    print('using rotate graph but no LLDSGD, graph 3')
                 else:
                     getInfo = communicator.communicate(model)
                     print('not using rotate graph and LLDSGD')
@@ -326,39 +324,6 @@ def test(model):
     for param in model.parameters():
         test_list.append(param.data)
     return test_list
-
-
-def update_learning_rate_VGG(optimizer, epoch, itr=None, itr_per_epoch=None,
-                         scale=1):
-    """
-    1) Linearly warmup to reference learning rate (5 epochs)
-    2) Decay learning rate exponentially (epochs 30, 60, 80)
-    ** note: args.lr is the reference learning rate from which to scale up
-    ** note: minimum global batch-size is 256
-    """
-    base_lr = 0.1
-    target_lr = args.lr
-    lr_schedule = [100, 180, 250]
-
-    lr = None
-    if args.warmup and epoch < 5:  # warmup to scaled lr
-        if target_lr <= base_lr:
-            lr = target_lr
-        else:
-            assert itr is not None and itr_per_epoch is not None
-            count = epoch * itr_per_epoch + itr + 1
-            incr = (target_lr - base_lr) * (count / (5 * itr_per_epoch))
-            lr = base_lr + incr
-    else:
-        lr = target_lr
-        for e in lr_schedule:
-            if epoch >= e:
-                lr *= 0.2
-
-    if lr is not None:
-        # print('Updating learning rate to {}'.format(lr))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
 
 
 def update_learning_rate(optimizer, epoch, itr=None, itr_per_epoch=None,

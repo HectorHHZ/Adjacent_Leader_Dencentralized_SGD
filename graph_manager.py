@@ -164,6 +164,7 @@ class GraphProcessor(object):
             new_connect = [-1 for i in range(self.size)]
             for edge in graph:
                 node1, node2 = edge[0], edge[1]
+                # To avoid deadlock! Important!
                 if new_connect[node1] != -1 or new_connect[node2] != -1:
                     print("invalide graph! graph: "+str(cnt))
                     exit()
@@ -175,7 +176,7 @@ class GraphProcessor(object):
         return connect
 
 class FixedProcessor(GraphProcessor):
-    """ wrapper for fixed communication graph """
+    """ wrapper for fixed communication graph"""
 
     def __init__(self, base_graph, commBudget, rank, size, iterations, issubgraph):
         super(FixedProcessor, self).__init__(base_graph, commBudget, rank, size, iterations, issubgraph)

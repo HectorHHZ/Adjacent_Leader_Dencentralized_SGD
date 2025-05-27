@@ -605,8 +605,6 @@ class LLDSGDCommunicator(Communicator):
         loss_list = [loss.tolist()]
         degree_List = list()
 
-
-
         self.comm.barrier()
         tic = time.time()
 
@@ -675,6 +673,11 @@ class LLDSGDCommunicator(Communicator):
             max_degree_model = torch.FloatTensor(max_degree_model)
 
 
+            # best_worker_force = torch.mul(torch.sub(self.recv_buffer, best_local_model), args.p1)
+            # max_degree_force = torch.mul(torch.sub(self.recv_buffer, max_degree_model), args.p2)
+            # self.recv_buffer = torch.sub(self.recv_buffer, torch.add(max_degree_force, best_worker_force))
+            # print("add additional step from local leader and max degree worker")
+###
             self.recv_buffer = torch.mul(self.recv_buffer, 1 - args.c1 - args.c2)
             self.recv_buffer += torch.mul(best_local_model, args.c1)
             self.recv_buffer += torch.mul(max_degree_model, args.c2)

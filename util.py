@@ -22,7 +22,12 @@ import torchvision
 from torchvision import datasets, transforms
 import torch.backends.cudnn as cudnn
 import torchvision.models as models
-
+from datasets import load_dataset
+from torch.utils.data import Dataset
+# import deeplake
+import os, glob
+from torchvision.io import read_image, ImageReadMode
+import re
 from models import *
 
 
@@ -40,6 +45,8 @@ class Partition(object):
     def __getitem__(self, index):
         data_idx = self.index[index]
         return self.data[data_idx]
+
+
 
 
 class DataPartitioner(object):
@@ -118,155 +125,238 @@ class DataPartitioner(object):
 
 
 
-def partition_dataset(rank, size, args):
 
-    print('==> load train data')
-    if args.dataset == 'cifar10':
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
-        trainset = torchvision.datasets.CIFAR10(root=args.datasetRoot,
-                                                train=True,
-                                                download=True,
-                                                transform=transform_train)
+class TinyImageNet(Dataset):
+    def __init__(self, root='./data', train=True, transform=None):
+        root = os.path.join(root, 'tiny-imagenet')
+        if train:
+            root = os.path.join(root, 'tiny-imagenet_train.pkl')
+        else:
+            root = os.path.join(root, 'tiny-imagenet_val.pkl')
+        with open(root, 'rb') as f:
+            dat = pickle.load(f)
+        self.data = dat['data']
+        self.targets = dat['targets']
+        self.transform = transform
 
-        partition_sizes = [1.0 / size for _ in range(size)]
-        partition = DataPartitioner(trainset, partition_sizes, isNonIID=False)
-        partition = partition.use(rank)
-        train_loader = torch.utils.data.DataLoader(partition,
-                                                   batch_size=args.bs,
-                                                   shuffle=True,
-                                                   pin_memory=True)
+    def __getitem__(self, item):
+        data, targets = Image.fromarray(self.data[item]), self.targets[item]
+        if self.transform is not None:
+            data = self.transform(data)
+        return data, targets
 
-        print('==> load test data')
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
-        testset = torchvision.datasets.CIFAR10(root=args.datasetRoot,
-                                               train=False,
-                                               download=True,
-                                               transform=transform_test)
-        test_loader = torch.utils.data.DataLoader(testset,
-                                                  batch_size=64,
-                                                  shuffle=False,
-                                                  num_workers=size)
-
-    if args.dataset == 'cifar100':
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-        ])
+    def __len__(self):
+        return len(self.data)
 
 
-        trainset = torchvision.datasets.CIFAR100(root=args.datasetRoot,
-                                                 train=True,
-                                                 download=True,
-                                                 transform=transform_train)
+class TrainTinyImageNetDataset(Dataset):
+    def __init__(self, id, transform=None):
+        self.filenames = glob.glob("/scratch/hh2537/data/test/tiny-imagenet-200/train/*/*.JPEG")
+        self.transform = transform
+        self.id_dict = id
 
-        partition_sizes = [1.0 / size for _ in range(size)]
-        partition = DataPartitioner(trainset, partition_sizes, isNonIID=False)
-        partition = partition.use(rank)
-        train_loader = torch.utils.data.DataLoader(partition,
-                                                   batch_size=args.bs,
-                                                   shuffle=True,
-                                                   pin_memory=True)
+    def __len__(self):
+        return len(self.filenames)
 
-        print('==> load test data')
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-        ])
-        testset = torchvision.datasets.CIFAR100(root=args.datasetRoot,
-                                                train=False,
-                                                download=True,
-                                                transform=transform_test)
-        test_loader = torch.utils.data.DataLoader(testset,
-                                                  batch_size=64,
-                                                  shuffle=False,
-                                                  num_workers=size)
+    def __getitem__(self, idx):
+        img_path = self.filenames[idx]
+        image = read_image(img_path)
+        if image.shape[0] == 1:
+          image = read_image(img_path,ImageReadMode.RGB)
+        # path is not general.
+        # print(img_path)
+        # print(img_path.split('/')[7])
+        label = self.id_dict[img_path.split('/')[7]]
+        if self.transform:
+            image = self.transform(image.type(torch.FloatTensor))
+        return image, label
 
-        print("The number of training data is:",len(trainset))
-        print("The number of test data is:",len(testset))
 
-    elif args.dataset == 'imagenet':
-        datadir = args.datasetRoot
-        traindir = os.path.join(datadir, 'CLS-LOC/train/')
-        # valdir = os.path.join(datadir, 'CLS-LOC/')
-        # testdir = os.path.join(datadir, 'CLS-LOC/')
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-        train_dataset = datasets.ImageFolder(
-            traindir,
-            transforms.Compose([
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                normalize,
-            ]))
+class TestTinyImageNetDataset(Dataset):
+    def __init__(self, id, transform=None):
+        self.filenames = glob.glob("/scratch/hh2537/data/test/tiny-imagenet-200/val/*/*.JPEG")
+        self.transform = transform
+        self.id_dict = id
+        self.cls_dic = {}
+        for i, line in enumerate(open('/scratch/hh2537/data/test/tiny-imagenet-200/val/val_annotations.txt', 'r')):
+            a = line.split('\t')
+            img, cls_id = a[0], a[1]
+            self.cls_dic[img] = self.id_dict[cls_id]
 
-        partition_sizes = [1.0 / size for _ in range(size)]
-        partition = DataPartitioner(train_dataset, partition_sizes, isNonIID=False)
-        partition = partition.use(rank)
+    def __len__(self):
+        return len(self.filenames)
 
-        train_loader = torch.utils.data.DataLoader(
-            partition, batch_size=args.bs, shuffle=True,
-            pin_memory=True)
-        '''
-        val_loader = torch.utils.data.DataLoader(
-            datasets.ImageFolder(valdir, transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                normalize,
-            ])),
-            batch_size=args.bs, shuffle=False,
-            pin_memory=True)
-        val_loader = None
-        '''
-        test_loader = None
+    def __getitem__(self, idx):
+        img_path = self.filenames[idx]
+        image = read_image(img_path)
+        if image.shape[0] == 1:
+            image = read_image(img_path, ImageReadMode.RGB)
+        label = self.cls_dic[img_path.split('/')[-1]]
+        if self.transform:
+            image = self.transform(image.type(torch.FloatTensor))
+        return image, label
 
-    if args.dataset == 'emnist':
-        transform_train = transforms.Compose([
-            transforms.ToTensor(),
-        ])
-        train_dataset = torchvision.datasets.EMNIST(root=args.datasetRoot,
-                                                    split='balanced',
-                                                    train=True,
-                                                    download=True,
-                                                    transform=transform_train)
-        partition_sizes = [1.0 / size for _ in range(size)]
-        partition = DataPartitioner(train_dataset, partition_sizes, isNonIID=False)
-        partition = partition.use(rank)
 
-        train_loader = torch.utils.data.DataLoader(
-            partition, batch_size=args.bs, shuffle=True,
-            pin_memory=True)
+class partition_dataset():
+        def __init__(self, rank, size, args):
+            self.rank = rank
+            self.size = size
+            self.args = args
 
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-        ])
-        testset = torchvision.datasets.EMNIST(root=args.datasetRoot,
-                                              split='balanced',
-                                              train=False,
-                                              download=True,
-                                              transform=transform_test)
-        test_loader = torch.utils.data.DataLoader(testset,
-                                                  batch_size=64,
-                                                  shuffle=False,
-                                                  num_workers=size)
 
-    return train_loader, test_loader
+        def get_test(self):
+
+            if self.args.dataset == 'cifar10':
+                print('==> load test data')
+                transform_test = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                ])
+                testset = torchvision.datasets.CIFAR10(root=self.args.datasetRoot,
+                                                       train=False,
+                                                       download=True,
+                                                       transform=transform_test)
+                test_loader = torch.utils.data.DataLoader(testset,
+                                                          batch_size=64,
+                                                          shuffle=False,
+                                                          num_workers=self.size)
+
+
+            if self.args.dataset == 'cifar100':
+                print('==> load test data')
+                transform_test = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+                ])
+                testset = torchvision.datasets.CIFAR100(root=self.args.datasetRoot,
+                                                        train=False,
+                                                        download=True,
+                                                        transform=transform_test)
+                test_loader = torch.utils.data.DataLoader(testset,
+                                                          batch_size=64,
+                                                          shuffle=False,
+                                                          num_workers=self.size)
+
+
+
+
+            if self.args.dataset == 'emnist':
+
+                transform_test = transforms.Compose([
+                    transforms.ToTensor(),
+                ])
+                testset = torchvision.datasets.EMNIST(root=self.args.datasetRoot,
+                                                      split='balanced',
+                                                      train=False,
+                                                      download=True,
+                                                      transform=transform_test)
+                test_loader = torch.utils.data.DataLoader(testset,
+                                                          batch_size=64,
+                                                          shuffle=False,
+                                                          num_workers=self.size)
+
+            if self.args.dataset == 'tinyImageNet':
+                # transform_test = transforms.Compose([
+                #     transforms.ToTensor(),
+                # ])
+                # tiny_imagenet_test = load_dataset('Maysee/tiny-imagenet', split='valid', cache_dir = "/home/hh2537/data/")
+                # test_loader = torch.utils.data.DataLoader(tiny_imagenet_test,
+                #                                           batch_size=64,
+                #                                           shuffle=False,
+                #                                           num_workers=self.size)
+
+                # tiny_imagenet_test = deeplake.load("hub://activeloop/tiny-imagenet-test")
+                # test_loader = tiny_imagenet_test.pytorch(num_workers=self.size, batch_size=64, shuffle=False)
+
+                id_dict = {}
+                for i, line in enumerate(open('/scratch/hh2537/data/test/tiny-imagenet-200/wnids.txt', 'r')):
+                    id_dict[line.replace('\n', '')] = i
+                transform = transforms.Normalize((122.4786, 114.2755, 101.3963), (70.4924, 68.5679, 71.8127))
+                testset = TestTinyImageNetDataset(id=id_dict, transform=transform)
+                test_loader = torch.utils.data.DataLoader(testset, batch_size=64, shuffle=False, num_workers=self.size)
+
+
+
+
+            return test_loader
+
+
+        def init_train(self):
+            print('==> load train data')
+            if self.args.dataset == 'cifar10':
+                transform_train = transforms.Compose([
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                ])
+                trainset = torchvision.datasets.CIFAR10(root=self.args.datasetRoot,
+                                                        train=True,
+                                                        download=True,
+                                                        transform=transform_train)
+            if self.args.dataset == 'cifar100':
+                transform_train = transforms.Compose([
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+                ])
+
+                trainset = torchvision.datasets.CIFAR100(root=self.args.datasetRoot,
+                                                              train=True,
+                                                              download=True,
+                                                              transform=transform_train)
+
+            if self.args.dataset == 'tinyImageNet':
+                # transform_train = transforms.Compose([
+                #     transforms.ToTensor(),
+                # ])
+                # trainset = load_dataset('Maysee/tiny-imagenet', split='train', cache_dir = "/home/hh2537/data/")
+                # trainset = deeplake.load("hub://activeloop/tiny-imagenet-train")
+                # test_loader = tiny_imagenet_test.pytorch(num_workers=self.size, batch_size=64, shuffle=False)
+
+                id_dict = {}
+                for i, line in enumerate(open('/scratch/hh2537/data/test/tiny-imagenet-200/wnids.txt', 'r')):
+                    id_dict[line.replace('\n', '')] = i
+                transform = transforms.Normalize((122.4786, 114.2755, 101.3963), (70.4924, 68.5679, 71.8127))
+                trainset = TrainTinyImageNetDataset(id=id_dict, transform = transform)
+                # trainloader = torch.utils.data.DataLoader(trainset, batch_size=64, shuffle=False, num_workers=self.size)
+
+
+
+            if self.args.dataset == 'emnist':
+                transform_train = transforms.Compose([
+                    transforms.ToTensor(),
+                ])
+                trainset = torchvision.datasets.EMNIST(root=self.args.datasetRoot,
+                                                            split='balanced',
+                                                            train=True,
+                                                            download=True,
+                                                            transform=transform_train)
+
+
+
+            partition_sizes = [1.0 / self.size for _ in range(self.size)]
+
+
+            self.partition = DataPartitioner(trainset, partition_sizes, isNonIID=False)
+
+
+
+        def get_train(self, subsetID):
+            partition = self.partition.use(subsetID)
+            train_loader = torch.utils.data.DataLoader(partition,
+                                                       batch_size=self.args.bs,
+                                                       shuffle=True,
+                                                       pin_memory=True)
+            return train_loader
+
 
 
 def select_model(num_class, args):
     if args.model == 'VGG':
         model = vggnet.VGG(16, num_class)
+        # model = vggnet.VGG(11, num_class)
     elif args.model == 'res':
         if args.dataset == 'cifar10':
             # model = large_resnet.ResNet18()

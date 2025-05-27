@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+import math
 
 def conv_init(m):
     classname = m.__class__.__name__
@@ -50,29 +51,68 @@ class VGG(nn.Module):
     def __init__(self, depth, num_classes):
         super(VGG, self).__init__()
         self.features = self._make_layers(cfg(depth))
-        self.linear = nn.Linear(512, num_classes)
+        # self.linear = nn.Linear(512, num_classes)
+        # self.linear = nn.Linear(2048, num_classes)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Dropout(),
+            nn.Linear(512, 512),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(512, 512),
+            nn.ReLU(True),
+            nn.Linear(512, num_classes),
+        )
+
+        ''' Initialize weights '''
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+                m.bias.data.zero_()
 
     def forward(self, x):
         out = self.features(x)
-        out = out.view(out.size(0), -1)
-        out = self.linear(out)
+        out = self.avgpool(out)
+        out = torch.flatten(out, 1)
+        out = self.classifier(out)
+
+
+        # out = out.view(out.size(0), -1)
+        # out = self.linear(out)
 
         return out
 
-    def _make_layers(self, cfg):
-        layers = []
-        in_planes = 3
+    # def _make_layers(self, cfg):
+    #     layers = []
+    #     in_planes = 3
+    #
+    #     for x in cfg:
+    #         if x == 'mp':
+    #             layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+    #         else:
+    #             layers += [conv3x3(in_planes, x), nn.BatchNorm2d(x), nn.ReLU(inplace=True)]
+    #             in_planes = x
+    #
+    #     # After cfg convolution
+    #     layers += [nn.AvgPool2d(kernel_size=1, stride=1)]
+    #     return nn.Sequential(*layers)
 
-        for x in cfg:
-            if x == 'mp':
+    def _make_layers(self, cfg, in_dims=3, batch_norm=True):
+        layers = []
+        in_channels = in_dims
+        for v in cfg:
+            if v == 'mp':
                 layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
             else:
-                layers += [conv3x3(in_planes, x), nn.BatchNorm2d(x), nn.ReLU(inplace=True)]
-                in_planes = x
-
-        # After cfg convolution
-        layers += [nn.AvgPool2d(kernel_size=1, stride=1)]
+                conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+                if batch_norm:
+                    layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+                else:
+                    layers += [conv2d, nn.ReLU(inplace=True)]
+                in_channels = v
         return nn.Sequential(*layers)
+
 
 if __name__ == "__main__":
     net = VGG(16, 10)
